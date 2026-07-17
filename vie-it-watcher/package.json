@@ -1,0 +1,13 @@
+{
+  "name": "vie-it-watcher",
+  "version": "1.0.0",
+  "description": "Agrégateur d'offres VIE en informatique -> email quotidien",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "playwright": "^1.47.0",
+    "resend": "^4.0.0"
+  }
+}
