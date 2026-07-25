@@ -2,13 +2,11 @@ name: Digest quotidien VIE / IT
 
 on:
   schedule:
-    # 6h00 UTC = 7h00 (hiver) / 8h00 (été) heure de Paris.
-    # Ajuste si tu veux une autre heure : https://crontab.guru
     - cron: "0 6 * * *"
-  workflow_dispatch: {} # permet de le lancer manuellement depuis l'onglet Actions
+  workflow_dispatch: {}
 
 permissions:
-  contents: write # nécessaire pour committer data/seen.json à jour
+  contents: write
 
 jobs:
   digest:
@@ -41,4 +39,5 @@ jobs:
           git config user.email "actions@github.com"
           git add data/seen.json
           git diff --staged --quiet || git commit -m "chore: update seen offers"
+          git pull --rebase --autostash
           git push
