@@ -1,79 +1,87 @@
 // Source : mon-vie-via.businessfrance.fr (site officiel du VIE).
 //
 // Ce site est une application JS (SPA) : le contenu n'existe pas dans le HTML
-// brut, il est chargé via des appels API internes après coup. Comme je n'ai
-// pas pu inspecter ces appels en direct (environnement sandbox sans accès à
-// ce domaine), ce module utilise une stratégie robuste plutôt que des
-// sélecteurs CSS figés :
+// brut, il est chargé via un appel API interne vers
+// civiweb-api-prd.azurewebsites.net/api/Offers/search. On a inspecté une
+// vraie réponse (grâce à DEBUG_VIE=1) et voici les champs utiles qu'elle
+// contient : missionTitle, organizationName, cityName, countryName,
+// reference, id, creationDate, missionDescription, missionProfile.
 //
-//   1. On ouvre la page de recherche avec un vrai navigateur (Playwright).
-//   2. On écoute TOUTES les réponses réseau que la page déclenche.
-//   3. On garde celles qui sont du JSON et qui "ressemblent" à une liste
-//      d'offres (héuristique sur les noms de champs les plus courants en
-//      français : intitule/titre, entreprise/societe, pays/lieu, etc).
-//
-// Si l'héuristique ne trouve rien du premier coup, lance le script en local
-// avec DEBUG_VIE=1 : il sauvegardera toutes les réponses JSON capturées dans
-// data/debug-responses.json pour qu'on puisse ajuster ensemble le mapping
-// exact des champs.
+// Si le mapping ne colle plus (le site a changé), relance avec DEBUG_VIE=1
+// en local : ça sauvegarde toutes les réponses JSON dans
+// data/debug-responses.json, ainsi qu'un aperçu des boutons/liens visibles
+// sur la page dans data/debug-buttons.json.
 
 import { chromium } from "playwright";
 import { writeFile } from "fs/promises";
 
-const SEARCH_URL = "https://mon-vie-via.businessfrance.fr/fr/offres/recherche";
+const SEARCH_URL = "https://mon-vie-via.businessfrance.fr/offres/recherche?latest=true";
 
-// Mots-clés IT utilisés pour filtrer les offres une fois récupérées
-// (le site catégorise normalement par "domaine", mais tant qu'on n'a pas
-// confirmé le nom exact du filtre, on filtre nous-mêmes sur le texte).
+// Nombre max de tentatives de "charger plus" (clic ou scroll) avant d'arrêter,
+// par sécurité si jamais la pagination ne se termine jamais.
+const MAX_LOAD_MORE_ATTEMPTS = 40;
+
+// Mots-clés IT : on cible informatique / logiciel / systèmes d'information.
 const IT_KEYWORDS = [
-  "informatique", "développeur", "developpeur", "dev ", "data",
-  "cybersécurité", "cybersecurite", "cloud", "devops", "logiciel",
-  "digital", "numérique", "numerique", "IT ", "SI ", "réseau", "reseau",
-  "système", "systeme", "full stack", "fullstack", "backend", "frontend",
-  "ingénieur informatique", "ingenieur informatique",
+  "informatique", "logiciel", "système d'information", "systeme d'information",
+  "développeur", "developpeur", "data", "cybersécurité", "cybersecurite",
+  "cloud", "devops", "digital", "numérique", "numerique", " IT ", " SI ",
+  "réseau", "reseau", "full stack", "fullstack", "backend", "frontend",
+  "ingénieur informatique", "ingenieur informatique", "software", "sap",
+  "programmeur", "programmation", "web developer", "software engineer",
 ];
 
+// Une réponse "ressemble" à une liste d'offres VIE si ses éléments ont un
+// champ missionTitle (nom de champ confirmé par inspection réelle de l'API).
 function looksLikeJobArray(value) {
   if (!Array.isArray(value) || value.length === 0) return false;
   const sample = value[0];
-  if (typeof sample !== "object" || sample === null) return false;
-  const keys = Object.keys(sample).map((k) => k.toLowerCase());
-  const hasTitleField = keys.some((k) =>
-    ["intitule", "titre", "title", "libelle", "poste"].includes(k)
+  return (
+    typeof sample === "object" &&
+    sample !== null &&
+    ("missionTitle" in sample || "reference" in sample)
   );
-  return hasTitleField;
-}
-
-function pick(obj, candidates, fallback) {
-  for (const key of Object.keys(obj)) {
-    if (candidates.includes(key.toLowerCase())) return obj[key];
-  }
-  return fallback;
 }
 
 function extractJobsFromJson(json) {
   const found = [];
-
   function walk(value) {
     if (looksLikeJobArray(value)) {
       found.push(...value);
       return;
     }
-    if (Array.isArray(value)) {
-      value.forEach(walk);
-    } else if (value && typeof value === "object") {
-      Object.values(value).forEach(walk);
+    if (Array.isArray(value)) value.forEach(walk);
+    else if (value && typeof value === "object") Object.values(value).forEach(walk);
+  }
+  walk(json);
+  return found;
+}
+
+async function tryLoadMore(page) {
+  // Stratégie 1 : un vrai <button>/<a> dont le texte contient "plus" et "offre(s)"
+  const byText = page.getByText(/plus.{0,15}offres?/i);
+  if ((await byText.count()) > 0) {
+    const el = byText.first();
+    if (await el.isVisible().catch(() => false)) {
+      await el.scrollIntoViewIfNeeded().catch(() => {});
+      await el.click({ timeout: 3000 }).catch(() => {});
+      return true;
     }
   }
 
-  walk(json);
-  return found;
+  // Stratégie 2 : infinite scroll — certains sites chargent la suite
+  // automatiquement quand on atteint le bas de page, sans bouton.
+  const previousHeight = await page.evaluate(() => document.body.scrollHeight);
+  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  await page.waitForTimeout(1200);
+  const newHeight = await page.evaluate(() => document.body.scrollHeight);
+  return newHeight > previousHeight;
 }
 
 export async function fetchBusinessFranceVieOffers() {
   const debug = process.env.DEBUG_VIE === "1";
   const capturedResponses = [];
-  const rawJobs = [];
+  const jobsById = new Map();
 
   const browser = await chromium.launch();
   try {
@@ -85,15 +93,53 @@ export async function fetchBusinessFranceVieOffers() {
       try {
         const json = await response.json();
         if (debug) capturedResponses.push({ url: response.url(), json });
-        rawJobs.push(...extractJobsFromJson(json));
+        for (const job of extractJobsFromJson(json)) {
+          jobsById.set(job.id ?? job.reference, job);
+        }
       } catch {
         // réponse non-JSON valide, on ignore
       }
     });
 
     await page.goto(SEARCH_URL, { waitUntil: "networkidle", timeout: 30000 });
-    // Laisse le temps aux appels API déclenchés après le rendu initial de partir
-    await page.waitForTimeout(3000);
+    await page.waitForTimeout(2000);
+
+    const cookieButton = page.getByRole("button", { name: /accepter|tout accepter|j'accepte/i });
+    if ((await cookieButton.count()) > 0) {
+      await cookieButton.first().click().catch(() => {});
+      await page.waitForTimeout(500);
+    }
+
+    let attempts = 0;
+    let stagnantRounds = 0;
+    let lastCount = jobsById.size;
+    while (attempts < MAX_LOAD_MORE_ATTEMPTS && stagnantRounds < 3) {
+      const progressed = await tryLoadMore(page);
+      await page.waitForTimeout(1500);
+      attempts += 1;
+
+      if (jobsById.size === lastCount && !progressed) {
+        stagnantRounds += 1;
+      } else {
+        stagnantRounds = 0;
+      }
+      lastCount = jobsById.size;
+    }
+    console.log(
+      `[businessFranceVie] ${attempts} tentative(s) de chargement, ${jobsById.size} offre(s) collectée(s).`
+    );
+
+    if (debug) {
+      const clickableTexts = await page
+        .locator("button, a, [role=button]")
+        .allTextContents()
+        .catch(() => []);
+      await writeFile(
+        "data/debug-buttons.json",
+        JSON.stringify(clickableTexts.filter((t) => t.trim()), null, 2),
+        "utf-8"
+      );
+    }
   } catch (err) {
     console.error("[businessFranceVie] Erreur navigation:", err.message);
   } finally {
@@ -107,41 +153,34 @@ export async function fetchBusinessFranceVieOffers() {
       "utf-8"
     );
     console.log(
-      `[businessFranceVie] DEBUG_VIE=1 : ${capturedResponses.length} réponses JSON sauvegardées dans data/debug-responses.json`
+      `[businessFranceVie] DEBUG_VIE=1 : ${capturedResponses.length} réponses JSON sauvegardées dans data/debug-responses.json ` +
+      `et les textes de boutons dans data/debug-buttons.json`
     );
   }
 
+  const rawJobs = Array.from(jobsById.values());
   if (rawJobs.length === 0) {
     console.warn(
-      "[businessFranceVie] Aucune offre détectée. Le site a peut-être changé de structure, " +
-      "ou nécessite une interaction (clic, connexion) avant de charger les offres. " +
-      "Relance avec DEBUG_VIE=1 en local pour inspecter les réponses réseau."
+      "[businessFranceVie] Aucune offre détectée. Relance avec DEBUG_VIE=1 en local pour inspecter les réponses réseau."
     );
     return [];
   }
 
-  const offers = rawJobs.map((job) => {
-    const title = pick(job, ["intitule", "titre", "title", "libelle", "poste"], "Offre VIE");
-    const company = pick(job, ["entreprise", "societe", "nomsociete", "raisonsociale", "company"], "Entreprise non précisée");
-    const location = pick(job, ["pays", "lieu", "ville", "localisation", "country"], "Lieu non précisé");
-    const id = pick(job, ["id", "reference", "idoffre", "offerid"], `${title}-${company}-${location}`);
-    const relativeUrl = pick(job, ["url", "lien", "lienoffre", "urldetail"], null);
+  const offers = rawJobs.map((job) => ({
+    id: `bfv-${job.id ?? job.reference}`,
+    title: job.missionTitle || "Offre VIE",
+    company: job.organizationName || "Entreprise non précisée",
+    location: [job.cityName, job.countryName].filter(Boolean).join(", ") || "Lieu non précisé",
+    url: job.reference
+      ? `https://mon-vie-via.businessfrance.fr/offres/details/${job.reference}`
+      : SEARCH_URL,
+    source: "Business France (VIE)",
+    publishedAt: job.creationDate || null,
+    _searchText: `${job.missionTitle || ""} ${job.missionDescription || ""} ${job.missionProfile || ""}`.toLowerCase(),
+  }));
 
-    return {
-      id: `bfv-${id}`,
-      title: String(title),
-      company: String(company),
-      location: String(location),
-      url: relativeUrl
-        ? new URL(relativeUrl, "https://mon-vie-via.businessfrance.fr").toString()
-        : SEARCH_URL,
-      source: "Business France (VIE)",
-      publishedAt: pick(job, ["datepublication", "dateCreation", "date"], null),
-    };
-  });
-
-  // Filtre IT sur le titre (à défaut de connaître le vrai champ "domaine")
-  return offers.filter((o) =>
-    IT_KEYWORDS.some((kw) => o.title.toLowerCase().includes(kw.toLowerCase()))
-  );
+  return offers
+    .filter((o) => IT_KEYWORDS.some((kw) => o._searchText.includes(kw.toLowerCase())))
+    .map(({ _searchText, ...o }) => o);
 }
+
