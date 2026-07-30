@@ -172,7 +172,7 @@ export async function fetchBusinessFranceVieOffers() {
     company: job.organizationName || "Entreprise non précisée",
     location: [job.cityName, job.countryName].filter(Boolean).join(", ") || "Lieu non précisé",
     url: job.reference
-      ? `https://mon-vie-via.businessfrance.fr/offres/details/${job.reference}`
+      ? `https://mon-vie-via.businessfrance.fr/offres/${job.id}`
       : SEARCH_URL,
     source: "Business France (VIE)",
     publishedAt: job.creationDate || null,
