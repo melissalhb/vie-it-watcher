@@ -2,6 +2,7 @@ import { loadSeenIds, saveSeenIds } from "./state.js";
 import { fetchBusinessFranceVieOffers } from "./sources/businessFranceVie.js";
 import { fetchFranceTravailOffers } from "./sources/franceTravail.js";
 import { sendDigestEmail } from "./emailer.js";
+import { sendTelegramNotification } from "./notifier.js";
 
 async function main() {
   const seen = await loadSeenIds();
@@ -24,7 +25,12 @@ async function main() {
     `[index] ${allOffers.length} offres récupérées au total, ${newOffers.length} nouvelle(s).`
   );
 
-  await sendDigestEmail(newOffers);
+  await Promise.all([
+    sendDigestEmail(newOffers),
+    sendTelegramNotification(newOffers).catch((err) =>
+      console.error("[telegram] Erreur:", err.message)
+    ),
+  ]);
 
   newOffers.forEach((o) => seen.add(o.id));
   await saveSeenIds(seen);

@@ -1,8 +1,8 @@
-name: Digest quotidien VIE / IT
+name: Watcher VIE / IT (horaire)
 
 on:
   schedule:
-    - cron: "0 6 * * *"
+    - cron: "0 * * * *" # toutes les heures, à la minute 0
   workflow_dispatch: {}
 
 permissions:
@@ -17,12 +17,25 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: "npm"
 
       - name: Installer les dépendances
         run: npm install
 
-      - name: Installer Chromium (Playwright)
+      - name: Récupérer le cache Chromium (Playwright)
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}
+
+      - name: Installer Chromium (si pas en cache)
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: npx playwright install --with-deps chromium
+
+      - name: Installer juste les dépendances système (si déjà en cache)
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
 
       - name: Lancer le script
         env:
@@ -31,6 +44,8 @@ jobs:
           DIGEST_FROM_EMAIL: ${{ secrets.DIGEST_FROM_EMAIL }}
           FT_CLIENT_ID: ${{ secrets.FT_CLIENT_ID }}
           FT_CLIENT_SECRET: ${{ secrets.FT_CLIENT_SECRET }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: npm start
 
       - name: Sauvegarder l'état (offres déjà vues)
